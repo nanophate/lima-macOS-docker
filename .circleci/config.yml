@@ -3,8 +3,7 @@ version: 2.1
 jobs:
   docker-on-macos:
     macos:
-      xcode: "16.2"
-    resource_class: macos.m1.medium.gen1
+      xcode: "16.2.0"
     
     steps:
       - checkout
@@ -31,59 +30,61 @@ jobs:
             WRAPPER
             
             sudo chmod +x /opt/homebrew/bin/qemu-system-aarch64
-            
-            echo "✓ QEMU patched to use TCG (software emulation)"
+            echo "✓ QEMU patched to use TCG"
       
       - run:
           name: Create Lima Docker VM
           command: |
-            # Answer "no" to any prompts (we don't need HVF signing for TCG)
-            echo "n" | limactl create --name=docker-tcg --vm-type=qemu template:docker --tty=false || true
+            yes n | limactl create --name=docker-tcg --vm-type=qemu template:docker --tty=false || true
             limactl list
       
       - run:
-          name: Start Lima VM (background)
-          command: |
-            # Answer "no" to the hypervisor signing prompt - we use TCG, not HVF
-            echo "n" | limactl start docker-tcg
-          background: true
-      
-      - run:
-          name: Tail Lima VM boot logs
+          name: Start Lima VM and tail logs
           command: |
             SERIAL_LOG="$HOME/.lima/docker-tcg/serial.log"
             
+            # Start Lima in background with "n" answer to signing prompt
+            # Use 'yes n' to keep answering "n" to any prompts
+            yes n | limactl start docker-tcg &
+            LIMA_PID=$!
+            
+            # Wait for serial log to appear
             echo "Waiting for VM to start booting..."
             for i in $(seq 1 60); do
               [ -f "$SERIAL_LOG" ] && break
               sleep 2
             done
             
-            if [ ! -f "$SERIAL_LOG" ]; then
-              echo "ERROR: Serial log not found after 2 minutes"
-              echo "=== ha.stderr.log ==="
-              cat "$HOME/.lima/docker-tcg/ha.stderr.log" 2>/dev/null || true
-              exit 1
+            if [ -f "$SERIAL_LOG" ]; then
+              echo "=== Tailing VM boot log ==="
+              tail -f "$SERIAL_LOG" &
+              TAIL_PID=$!
             fi
             
-            echo "=== Tailing VM boot log ==="
-            tail -f "$SERIAL_LOG" &
-            TAIL_PID=$!
-            
-            # Wait for Lima to report Running (check every 10s, max 15 min)
-            for i in $(seq 1 90); do
+            # Wait for Lima process to complete or VM to be running
+            while kill -0 $LIMA_PID 2>/dev/null; do
               if limactl list docker-tcg 2>/dev/null | grep -q "Running"; then
                 echo ""
                 echo "✓ Lima VM is ready!"
-                kill $TAIL_PID 2>/dev/null || true
-                exit 0
+                break
               fi
-              sleep 10
+              sleep 5
             done
             
-            echo "ERROR: Lima VM failed to start within 15 minutes"
+            # Wait for Lima start to fully complete
+            wait $LIMA_PID || true
+            
+            # Kill tail
             kill $TAIL_PID 2>/dev/null || true
-            exit 1
+            
+            # Final check
+            if limactl list docker-tcg | grep -q "Running"; then
+              echo "✓ VM started successfully"
+            else
+              echo "ERROR: VM not running"
+              cat "$HOME/.lima/docker-tcg/ha.stderr.log" 2>/dev/null || true
+              exit 1
+            fi
           no_output_timeout: 20m
       
       - run:
