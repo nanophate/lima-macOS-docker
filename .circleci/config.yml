@@ -9,120 +9,22 @@ jobs:
       - checkout
       
       - run:
-          name: Install Lima and QEMU
+          name: Check nested virtualization support
           command: |
-            brew install lima qemu
-      
-      - run:
-          name: Patch QEMU to force TCG mode
-          command: |
-            # Move real QEMU binary
-            sudo mv /opt/homebrew/bin/qemu-system-aarch64 /opt/homebrew/bin/qemu-system-aarch64.real
+            echo "=== CPU Info ==="
+            sysctl -n machdep.cpu.brand_string
             
-            # Create wrapper that forces TCG instead of HVF
-            sudo tee /opt/homebrew/bin/qemu-system-aarch64 \<< 'WRAPPER'
-            #!/bin/bash
-            args=()
-            for arg in "$@"; do
-              args+=("${arg//accel=hvf/accel=tcg}")
-            done
-            exec /opt/homebrew/bin/qemu-system-aarch64.real "${args[@]}"
-            WRAPPER
+            echo "=== Check VZ Support ==="
+            swift -e 'import Virtualization; print("VZ Supported:", VZVirtualMachine.isSupported)'
             
-            sudo chmod +x /opt/homebrew/bin/qemu-system-aarch64
-            echo "✓ QEMU patched to use TCG"
-      
-      - run:
-          name: Create Lima Docker VM
-          command: |
-            yes n | limactl create --name=docker-tcg --vm-type=qemu template:docker --tty=false || true
-            limactl list
-      
-      - run:
-          name: Start Lima VM and tail logs
-          command: |
-            SERIAL_LOG="$HOME/.lima/docker-tcg/serial.log"
-            
-            # Start Lima in background with "n" answer to signing prompt
-            # Use 'yes n' to keep answering "n" to any prompts
-            yes n | limactl start docker-tcg &
-            LIMA_PID=$!
-            
-            # Wait for serial log to appear
-            echo "Waiting for VM to start booting..."
-            for i in $(seq 1 60); do
-              [ -f "$SERIAL_LOG" ] && break
-              sleep 2
-            done
-            
-            if [ -f "$SERIAL_LOG" ]; then
-              echo "=== Tailing VM boot log ==="
-              tail -f "$SERIAL_LOG" &
-              TAIL_PID=$!
-            fi
-            
-            # Wait for Lima process to complete or VM to be running
-            while kill -0 $LIMA_PID 2>/dev/null; do
-              if limactl list docker-tcg 2>/dev/null | grep -q "Running"; then
-                echo ""
-                echo "✓ Lima VM is ready!"
-                break
-              fi
-              sleep 5
-            done
-            
-            # Wait for Lima start to fully complete
-            wait $LIMA_PID || true
-            
-            # Kill tail
-            kill $TAIL_PID 2>/dev/null || true
-            
-            # Final check
-            if limactl list docker-tcg | grep -q "Running"; then
-              echo "✓ VM started successfully"
-            else
-              echo "ERROR: VM not running"
-              cat "$HOME/.lima/docker-tcg/ha.stderr.log" 2>/dev/null || true
-              exit 1
-            fi
-          no_output_timeout: 20m
-      
-      - run:
-          name: Setup Docker context
-          command: |
-            limactl shell docker-tcg -- sudo systemctl start docker
-            limactl shell docker-tcg -- sudo systemctl enable docker
-            
-            docker context create lima-docker-tcg --docker "host=unix://$HOME/.lima/docker-tcg/sock/docker.sock" || true
-            docker context use lima-docker-tcg
-            
-            docker version
-      
-      - run:
-          name: Run Docker container
-          command: |
-            docker run --rm hello-world
-            docker run --rm cimg/base:current uname -a
-      
-      - run:
-          name: Debug logs (on failure)
-          command: |
-            echo "=== Lima List ==="
-            limactl list
-            echo "=== ha.stderr.log ==="
-            cat "$HOME/.lima/docker-tcg/ha.stderr.log" 2>/dev/null || true
-            echo "=== serial.log (last 200 lines) ==="
-            tail -200 "$HOME/.lima/docker-tcg/serial.log" 2>/dev/null || true
-          when: on_fail
-      
-      - run:
-          name: Cleanup
-          command: |
-            limactl stop docker-tcg || true
-            limactl delete docker-tcg -f || true
-          when: always
+            echo "=== Try VZ directly ==="
+            limactl create --name=test-vz --vm-type=vz template:default --tty=false
+            limactl start test-vz
+            limactl shell test-vz -- uname -a
+            limactl delete test-vz -f
 
 workflows:
   build:
     jobs:
       - docker-on-macos
+
