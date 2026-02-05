@@ -3,9 +3,7 @@ version: 2.1
 jobs:
   docker-on-macos:
     macos:
-      xcode: "16.2"
-    resource_class: macos.m1.medium.gen1
-    
+      xcode: "16.2"    
     steps:
       - checkout
       
@@ -21,7 +19,7 @@ jobs:
             sudo mv /opt/homebrew/bin/qemu-system-aarch64 /opt/homebrew/bin/qemu-system-aarch64.real
             
             # Create wrapper that forces TCG instead of HVF
-            sudo tee /opt/homebrew/bin/qemu-system-aarch64 << 'WRAPPER'
+            sudo tee /opt/homebrew/bin/qemu-system-aarch64 \<< 'WRAPPER'
             #!/bin/bash
             args=()
             for arg in "$@"; do
