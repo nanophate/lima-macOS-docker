@@ -16,10 +16,8 @@ jobs:
       - run:
           name: Patch QEMU to force TCG mode
           command: |
-            # Move real QEMU binary
             sudo mv /opt/homebrew/bin/qemu-system-aarch64 /opt/homebrew/bin/qemu-system-aarch64.real
             
-            # Create wrapper that forces TCG instead of HVF
             sudo tee /opt/homebrew/bin/qemu-system-aarch64 \<< 'WRAPPER'
             #!/bin/bash
             args=()
@@ -35,12 +33,12 @@ jobs:
       - run:
           name: Create Lima Docker VM
           command: |
-            # Use expect to handle interactive prompts
             /usr/bin/expect \<< 'EOF'
             set timeout 300
             spawn limactl create --name=docker-tcg --vm-type=qemu template:docker --tty=false
             expect {
-              "Try to sign*" { send "n\r"; exp_continue }
+              "Try to sign*" { send "y\r"; exp_continue }
+              "Y/n" { send "y\r"; exp_continue }
               "Proceed with the current configuration" { send "y\r"; exp_continue }
               eof
             }
@@ -53,19 +51,18 @@ jobs:
           command: |
             SERIAL_LOG="$HOME/.lima/docker-tcg/serial.log"
             
-            # Use expect to handle the signing prompt
+            # Use expect to answer "yes" to prompts
             /usr/bin/expect \<< 'EXPECT_SCRIPT' &
             set timeout 1200
             spawn limactl start docker-tcg
             expect {
-              "Try to sign*" { send "n\r"; exp_continue }
-              "Y/n" { send "n\r"; exp_continue }
+              "Try to sign*" { send "y\r"; exp_continue }
+              "Y/n" { send "y\r"; exp_continue }
               eof
             }
             EXPECT_SCRIPT
             EXPECT_PID=$!
             
-            # Wait for serial log to appear
             echo "Waiting for VM to start booting..."
             for i in $(seq 1 120); do
               [ -f "$SERIAL_LOG" ] && break
@@ -78,7 +75,6 @@ jobs:
               TAIL_PID=$!
             fi
             
-            # Wait for Lima to report Running
             for i in $(seq 1 180); do
               if limactl list docker-tcg 2>/dev/null | grep -q "Running"; then
                 echo ""
@@ -88,16 +84,11 @@ jobs:
               sleep 5
             done
             
-            # Wait for expect to finish
             wait $EXPECT_PID 2>/dev/null || true
-            
-            # Kill tail
             kill $TAIL_PID 2>/dev/null || true
             
-            # Final check
             if limactl list docker-tcg | grep -q "Running"; then
               echo "✓ VM started successfully"
-              limactl list docker-tcg
             else
               echo "ERROR: VM not running"
               cat "$HOME/.lima/docker-tcg/ha.stderr.log" 2>/dev/null || true
@@ -114,7 +105,6 @@ jobs:
             docker context create lima-docker-tcg --docker "host=unix://$HOME/.lima/docker-tcg/sock/docker.sock" || true
             docker context use lima-docker-tcg
             
-            echo "=== Docker Version ==="
             docker version
       
       - run:
