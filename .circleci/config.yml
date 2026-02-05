@@ -1,0 +1,64 @@
+version: 2.1
+
+jobs:
+  docker-on-macos:
+    macos:
+      xcode: "26.2"
+    steps:
+      - run:
+          name: Install Lima and QEMU
+          command: brew install lima qemu
+
+      - run:
+          name: Create Lima Docker VM
+          command: |
+            limactl create --name=docker-tcg --vm-type=qemu template:docker --tty=false
+            
+      - run:
+          name: Start Lima VM (background)
+          command: |
+            limactl start docker-tcg
+          background: true
+      
+      - run:
+          name: Tail Lima VM boot logs
+          command: |
+            SERIAL_LOG="$HOME/.lima/docker-tcg/serial.log"
+            
+            # Wait for serial log to exist
+            echo "Waiting for VM to start booting..."
+            while [ ! -f "$SERIAL_LOG" ]; do
+              sleep 2
+            done
+            
+            echo "=== Tailing VM boot log ==="
+            # Tail until we see cloud-init finished or timeout
+            timeout 600 tail -f "$SERIAL_LOG" &
+            TAIL_PID=$!
+            
+            # Wait for Lima to report Running
+            while ! limactl list docker-tcg 2>/dev/null | grep -q "Running"; do
+              sleep 5
+            done
+            
+            echo ""
+            echo "✓ Lima VM is ready!"
+            kill $TAIL_PID 2>/dev/null || true
+          no_output_timeout: 15m
+      
+      - run:
+          name: Enable Docker
+          command: |
+            limactl shell docker-tcg -- sudo systemctl start docker
+            limactl shell docker-tcg -- sudo systemctl enable docker
+            limactl shell docker-tcg -- docker version
+  
+      - run:
+          name: Run Docker container
+          command: |
+            limactl shell docker-tcg -- docker run --rm cimg/base:current uname -a
+
+workflows:
+  build:
+    jobs:
+      - docker-on-macos
