@@ -3,7 +3,9 @@ version: 2.1
 jobs:
   docker-on-macos:
     macos:
-      xcode: "26.2.0"    
+      xcode: "16.2"
+    resource_class: macos.m1.medium.gen1
+    
     steps:
       - checkout
       
@@ -35,13 +37,15 @@ jobs:
       - run:
           name: Create Lima Docker VM
           command: |
-            yes | limactl create --name=docker-tcg --vm-type=qemu template:docker --tty=false || true
+            # Answer "no" to any prompts (we don't need HVF signing for TCG)
+            echo "n" | limactl create --name=docker-tcg --vm-type=qemu template:docker --tty=false || true
             limactl list
       
       - run:
           name: Start Lima VM (background)
           command: |
-            limactl start docker-tcg
+            # Answer "no" to the hypervisor signing prompt - we use TCG, not HVF
+            echo "n" | limactl start docker-tcg
           background: true
       
       - run:
@@ -85,15 +89,12 @@ jobs:
       - run:
           name: Setup Docker context
           command: |
-            # Enable Docker in the VM
             limactl shell docker-tcg -- sudo systemctl start docker
             limactl shell docker-tcg -- sudo systemctl enable docker
             
-            # Create Docker context pointing to Lima socket
             docker context create lima-docker-tcg --docker "host=unix://$HOME/.lima/docker-tcg/sock/docker.sock" || true
             docker context use lima-docker-tcg
             
-            echo "=== Docker Version ==="
             docker version
       
       - run:
@@ -107,10 +108,8 @@ jobs:
           command: |
             echo "=== Lima List ==="
             limactl list
-            echo ""
             echo "=== ha.stderr.log ==="
             cat "$HOME/.lima/docker-tcg/ha.stderr.log" 2>/dev/null || true
-            echo ""
             echo "=== serial.log (last 200 lines) ==="
             tail -200 "$HOME/.lima/docker-tcg/serial.log" 2>/dev/null || true
           when: on_fail
