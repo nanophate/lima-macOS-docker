@@ -1,24 +1,34 @@
+# CircleCI config for running Docker on macOS using Lima + QEMU TCG
+# Use this when hardware virtualization is unavailable (e.g., macOS VMs)
+
 version: 2.1
 
 jobs:
   docker-on-macos:
     macos:
-      xcode: "26.2.0"
+      xcode: "26.2.0" 
     
     steps:
       - checkout
       
       - run:
-          name: Install dependencies
+          name: Install dependencies (lima, qemu, expect)
           command: |
+            export PATH="/opt/homebrew/bin:$PATH"
             brew install lima qemu expect
       
       - run:
-          name: Patch QEMU to force TCG mode
+          name: Setup QEMU wrapper for TCG mode
           command: |
-            sudo mv /opt/homebrew/bin/qemu-system-aarch64 /opt/homebrew/bin/qemu-system-aarch64.real
+            export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$PATH"
             
-            sudo tee /opt/homebrew/bin/qemu-system-aarch64 \<< 'WRAPPER'
+            # Move original QEMU binary if not already done
+            if [[ ! -f /opt/homebrew/bin/qemu-system-aarch64.real ]]; then
+                sudo mv /opt/homebrew/bin/qemu-system-aarch64 /opt/homebrew/bin/qemu-system-aarch64.real
+            fi
+            
+            # Create wrapper that forces TCG (software emulation instead of HVF)
+            sudo tee /opt/homebrew/bin/qemu-system-aarch64 > /dev/null \<< 'WRAPPER'
             #!/bin/bash
             args=()
             for arg in "$@"; do
@@ -26,112 +36,117 @@ jobs:
             done
             exec /opt/homebrew/bin/qemu-system-aarch64.real "${args[@]}"
             WRAPPER
-            
             sudo chmod +x /opt/homebrew/bin/qemu-system-aarch64
-            echo "✓ QEMU patched to use TCG"
       
       - run:
           name: Create Lima Docker VM
+          no_output_timeout: 10m
           command: |
-            /usr/bin/expect \<< 'EOF'
-            set timeout 300
+            export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$PATH"
+            
+            # Use expect to handle interactive prompts (QEMU signing, config confirmation)
+            /usr/bin/expect \<< 'EXPECT_SCRIPT'
+            set timeout 600
             spawn limactl create --name=docker-tcg --vm-type=qemu template:docker --tty=false
             expect {
-              "Try to sign*" { send "y\r"; exp_continue }
-              "Y/n" { send "y\r"; exp_continue }
-              "Proceed with the current configuration" { send "y\r"; exp_continue }
-              eof
+                -re "Try to sign.*\\?" { send "y\r"; exp_continue }
+                -re "\\(Y/n\\)" { send "y\r"; exp_continue }
+                -re "Proceed with the current configuration.*\\?" { send "y\r"; exp_continue }
+                timeout { 
+                    puts "ERROR: Timeout during limactl create"
+                    exit 1 
+                }
+                eof
             }
-            EOF
-            
-            limactl list
+            catch wait result
+            set exit_code [lindex $result 3]
+            puts "limactl create exited with code: $exit_code"
+            exit $exit_code
+            EXPECT_SCRIPT
       
       - run:
-          name: Start Lima VM
+          name: Start Lima Docker VM
+          no_output_timeout: 15m
           command: |
-            SERIAL_LOG="$HOME/.lima/docker-tcg/serial.log"
+            export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$PATH"
             
-            # Use expect to answer "yes" to prompts
-            /usr/bin/expect \<< 'EXPECT_SCRIPT' &
-            set timeout 1200
-            spawn limactl start docker-tcg
+            /usr/bin/expect \<< 'EXPECT_SCRIPT'
+            set timeout 900
+            spawn limactl start docker-tcg --tty=false
             expect {
-              "Try to sign*" { send "y\r"; exp_continue }
-              "Y/n" { send "y\r"; exp_continue }
-              eof
+                -re "Try to sign.*\\?" { send "y\r"; exp_continue }
+                -re "\\(Y/n\\)" { send "y\r"; exp_continue }
+                -re "Proceed with the current configuration.*\\?" { send "y\r"; exp_continue }
+                timeout { 
+                    puts "ERROR: Timeout during limactl start"
+                    exit 1 
+                }
+                eof
             }
+            catch wait result
+            set exit_code [lindex $result 3]
+            puts "limactl start exited with code: $exit_code"
+            exit $exit_code
             EXPECT_SCRIPT
-            EXPECT_PID=$!
+      
+      - run:
+          name: Verify Lima VM is running
+          command: |
+            export PATH="/opt/homebrew/bin:$PATH"
+            limactl list
             
-            echo "Waiting for VM to start booting..."
-            for i in $(seq 1 120); do
-              [ -f "$SERIAL_LOG" ] && break
-              sleep 2
-            done
-            
-            if [ -f "$SERIAL_LOG" ]; then
-              echo "=== Tailing VM boot log ==="
-              tail -f "$SERIAL_LOG" &
-              TAIL_PID=$!
-            fi
-            
-            for i in $(seq 1 180); do
-              if limactl list docker-tcg 2>/dev/null | grep -q "Running"; then
-                echo ""
-                echo "✓ Lima VM is ready!"
+            # Wait for VM to be fully ready
+            for i in {1..30}; do
+              if limactl shell docker-tcg docker version > /dev/null 2>&1; then
+                echo "Docker is ready!"
                 break
               fi
-              sleep 5
+              echo "Waiting for Docker... ($i/30)"
+              sleep 10
             done
-            
-            wait $EXPECT_PID 2>/dev/null || true
-            kill $TAIL_PID 2>/dev/null || true
-            
-            if limactl list docker-tcg | grep -q "Running"; then
-              echo "✓ VM started successfully"
-            else
-              echo "ERROR: VM not running"
-              cat "$HOME/.lima/docker-tcg/ha.stderr.log" 2>/dev/null || true
-              exit 1
-            fi
-          no_output_timeout: 25m
       
       - run:
-          name: Setup Docker
+          name: Setup Docker context
           command: |
-            limactl shell docker-tcg -- sudo systemctl start docker
-            limactl shell docker-tcg -- sudo systemctl enable docker
+            export PATH="/opt/homebrew/bin:$PATH"
             
-            docker context create lima-docker-tcg --docker "host=unix://$HOME/.lima/docker-tcg/sock/docker.sock" || true
+            # Create Docker context pointing to Lima VM
+            docker context create lima-docker-tcg \
+              --docker "host=unix://$HOME/.lima/docker-tcg/sock/docker.sock" || true
             docker context use lima-docker-tcg
+      
+      - run:
+          name: Test Docker
+          command: |
+            export PATH="/opt/homebrew/bin:$PATH"
             
+            echo "=== Docker Version ==="
             docker version
-      
-      - run:
-          name: Run Docker container
-          command: |
+            
+            echo "=== Running hello-world ==="
             docker run --rm hello-world
-            docker run --rm cimg/base:current uname -a
+      
+      # Your actual Docker commands go here
+      - run:
+          name: Run your Docker commands
+          command: |
+            export PATH="/opt/homebrew/bin:$PATH"
+            
+            # Example: Build and run a container
+            # docker build -t myapp .
+            # docker run --rm myapp
+            
+            echo "Add your Docker commands here"
       
       - run:
-          name: Debug logs (on failure)
-          command: |
-            echo "=== Lima List ==="
-            limactl list
-            echo "=== ha.stderr.log ==="
-            cat "$HOME/.lima/docker-tcg/ha.stderr.log" 2>/dev/null || true
-            echo "=== serial.log (last 200 lines) ==="
-            tail -200 "$HOME/.lima/docker-tcg/serial.log" 2>/dev/null || true
-          when: on_fail
-      
-      - run:
-          name: Cleanup
-          command: |
-            limactl stop docker-tcg || true
-            limactl delete docker-tcg -f || true
+          name: Cleanup Lima VM
           when: always
+          command: |
+            export PATH="/opt/homebrew/bin:$PATH"
+            limactl stop docker-tcg --force || true
+            limactl delete docker-tcg --force || true
 
 workflows:
-  build:
+  docker-workflow:
     jobs:
       - docker-on-macos
