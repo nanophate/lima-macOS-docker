@@ -36,7 +36,7 @@ jobs:
           name: Create Lima Docker VM
           command: |
             # Use expect to handle interactive prompts
-            /usr/bin/expect << 'EOF'
+            /usr/bin/expect \<< 'EOF'
             set timeout 300
             spawn limactl create --name=docker-tcg --vm-type=qemu template:docker --tty=false
             expect {
@@ -54,7 +54,7 @@ jobs:
             SERIAL_LOG="$HOME/.lima/docker-tcg/serial.log"
             
             # Use expect to handle the signing prompt
-            /usr/bin/expect << 'EXPECT_SCRIPT' &
+            /usr/bin/expect \<< 'EXPECT_SCRIPT' &
             set timeout 1200
             spawn limactl start docker-tcg
             expect {
