@@ -13,6 +13,7 @@ jobs:
           command: |
             echo "=== CPU Info ===="
             sysctl -n machdep.cpu.brand_string
+            sleep 30
             
             echo "=== Check VZ Support ==="
             swift -e 'import Virtualization; print("VZ Supported:", VZVirtualMachine.isSupported)'
