@@ -11,7 +11,7 @@ jobs:
       - run:
           name: Check nested virtualization support
           command: |
-            echo "=== CPU Info ==="
+            echo "=== CPU Info === "
             sysctl -n machdep.cpu.brand_string
             
             echo "=== Check VZ Support ==="
